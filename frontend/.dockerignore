@@ -1,0 +1,7 @@
+node_modules
+dist
+*.tmp.*
+spec.tmp.mjs
+vitest.tmp.config.mjs
+setup.mjs
+run.mjs
