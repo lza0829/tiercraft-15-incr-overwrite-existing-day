@@ -119,7 +119,7 @@ async function onModeChanged() {
           <tr>
             <th>编号</th><th>步骤</th><th>模式</th><th>状态</th><th>说明</th>
             <th>写入日</th><th>跳过日</th><th>输入</th><th>写入</th><th>剔除</th>
-            <th>失败原因</th><th>时间</th>
+            <th>装载裁决证明</th><th>失败原因</th><th>时间</th>
           </tr>
         </thead>
         <tbody>
@@ -134,6 +134,31 @@ async function onModeChanged() {
             <td>{{ j.in_count }}</td>
             <td>{{ j.out_count }}</td>
             <td>{{ j.drop_count }}</td>
+            <td>
+              <template v-if="j.load_verdict">
+                <div class="muted small">
+                  模式：{{ j.load_verdict.load_mode_label }}
+                </div>
+                <div class="muted small">
+                  写入日：{{ j.load_verdict.written_days.length ? j.load_verdict.written_days.join('、') : '无' }}
+                </div>
+                <div class="muted small">
+                  跳过日：<span :class="j.load_verdict.skipped_days.length ? 'warn' : ''">
+                    {{ j.load_verdict.skipped_days.length ? j.load_verdict.skipped_days.join('、') : '无' }}
+                  </span>
+                </div>
+                <div class="small">
+                  下游：
+                  <b :class="j.load_verdict.downstream_pending ? 'warn' : 'ok'">
+                    {{ j.load_verdict.downstream_pending ? '待重跑' : '非待重跑' }}
+                  </b>
+                </div>
+                <div v-for="c in j.load_verdict.day_row_counts" :key="c.biz_day" class="muted small">
+                  {{ c.biz_day }}：{{ c.rows }} 行
+                </div>
+              </template>
+              <span v-else class="muted">—</span>
+            </td>
             <td class="muted">{{ j.fail_reason || '—' }}</td>
             <td>{{ j.created_at }}</td>
           </tr>

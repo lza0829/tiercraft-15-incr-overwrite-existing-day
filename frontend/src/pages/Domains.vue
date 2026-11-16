@@ -1,15 +1,26 @@
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { getJson, putJson } from '../api'
 
 const rows = ref([])
+const verdicts = ref([])
 const err = ref('')
 const notice = ref('')
 const busy = ref(false)
 const draft = ref({})
 
+const latestVerdict = computed(() => {
+  // /load-verdicts 按 id 倒序返回，每个主题域的第一条即最近一次装载裁决证明。
+  const map = {}
+  for (const v of verdicts.value) {
+    if (!map[v.domain_id]) map[v.domain_id] = v
+  }
+  return map
+})
+
 async function refresh() {
   rows.value = await getJson('/api/domains')
+  verdicts.value = await getJson('/api/load-verdicts')
   const next = {}
   for (const d of rows.value) next[d.id] = d.load_mode
   draft.value = next
@@ -52,7 +63,7 @@ async function saveMode(d) {
         <thead>
           <tr>
             <th>编号</th><th>名称</th><th>业务键</th><th>夹具文件</th>
-            <th>装载模式</th><th>下游状态</th><th>说明</th>
+            <th>装载模式</th><th>下游状态</th><th>最近装载裁决证明</th><th>说明</th>
           </tr>
         </thead>
         <tbody>
@@ -74,6 +85,37 @@ async function saveMode(d) {
               <div class="muted small">当前：{{ d.load_mode_label }}</div>
             </td>
             <td :class="d.downstream_status === '已对齐' ? 'ok' : 'warn'">{{ d.downstream_status }}</td>
+            <td>
+              <template v-if="latestVerdict[d.id]">
+                <div class="muted small">
+                  模式：{{ latestVerdict[d.id].load_mode_label }}
+                </div>
+                <div class="muted small">
+                  写入日：{{ latestVerdict[d.id].written_days.length
+                    ? latestVerdict[d.id].written_days.join('、') : '无' }}
+                </div>
+                <div class="muted small">
+                  跳过日：<span :class="latestVerdict[d.id].skipped_days.length ? 'warn' : ''">
+                    {{ latestVerdict[d.id].skipped_days.length
+                      ? latestVerdict[d.id].skipped_days.join('、') : '无' }}
+                  </span>
+                </div>
+                <div class="small">
+                  下游：
+                  <b :class="latestVerdict[d.id].downstream_pending ? 'warn' : 'ok'">
+                    {{ latestVerdict[d.id].downstream_pending ? '待重跑' : '非待重跑' }}
+                  </b>
+                </div>
+                <div
+                  v-for="c in latestVerdict[d.id].day_row_counts"
+                  :key="c.biz_day"
+                  class="muted small"
+                >
+                  {{ c.biz_day }}：{{ c.rows }} 行
+                </div>
+              </template>
+              <span v-else class="muted">暂无装载</span>
+            </td>
             <td>{{ d.description }}</td>
           </tr>
         </tbody>

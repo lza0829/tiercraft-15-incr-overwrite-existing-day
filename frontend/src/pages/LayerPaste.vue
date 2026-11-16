@@ -109,7 +109,7 @@ async function onModeChanged() {
       <h3>最近装载记录</h3>
       <table v-if="jobs.length">
         <thead>
-          <tr><th>编号</th><th>模式</th><th>状态</th><th>写入日</th><th>跳过日</th><th>写入行数</th><th>失败原因</th><th>时间</th></tr>
+          <tr><th>编号</th><th>模式</th><th>状态</th><th>写入日</th><th>跳过日</th><th>写入行数</th><th>装载裁决证明</th><th>失败原因</th><th>时间</th></tr>
         </thead>
         <tbody>
           <tr v-for="j in jobs" :key="j.id">
@@ -119,6 +119,28 @@ async function onModeChanged() {
             <td>{{ j.written_days.length ? j.written_days.join('、') : '—' }}</td>
             <td>{{ j.skipped_days.length ? j.skipped_days.join('、') : '—' }}</td>
             <td>{{ j.out_count }}</td>
+            <td>
+              <template v-if="j.load_verdict">
+                <div class="muted small">
+                  写入 {{ j.load_verdict.written_day_count }} 日 /
+                  跳过 {{ j.load_verdict.skipped_day_count }} 日
+                </div>
+                <div
+                  v-for="c in j.load_verdict.day_row_counts"
+                  :key="c.biz_day"
+                  class="muted small"
+                >
+                  {{ c.biz_day }}：{{ c.rows }} 行
+                </div>
+                <div class="small">
+                  下游：
+                  <b :class="j.load_verdict.downstream_pending ? 'warn' : 'ok'">
+                    {{ j.load_verdict.downstream_pending ? '待重跑' : '非待重跑' }}
+                  </b>
+                </div>
+              </template>
+              <span v-else class="muted">—</span>
+            </td>
             <td class="muted">{{ j.fail_reason || '—' }}</td>
             <td>{{ j.created_at }}</td>
           </tr>

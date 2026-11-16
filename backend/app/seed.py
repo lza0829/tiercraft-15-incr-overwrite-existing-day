@@ -83,6 +83,21 @@ CREATE TABLE IF NOT EXISTS reconcile_reports (
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   FOREIGN KEY(domain_id) REFERENCES domains(id)
 );
+
+-- 装载裁决证明（基线所无的新实体）：每次贴源装载任务一条，与任务 1:1，
+-- 只追加、不更新；字段与贴源按日计数同源派生。
+CREATE TABLE IF NOT EXISTS load_verdicts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id INTEGER NOT NULL UNIQUE,
+  domain_id INTEGER NOT NULL,
+  load_mode TEXT NOT NULL,
+  written_days TEXT NOT NULL DEFAULT '[]',
+  skipped_days TEXT NOT NULL DEFAULT '[]',
+  downstream_pending INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY(job_id) REFERENCES layer_jobs(id),
+  FOREIGN KEY(domain_id) REFERENCES domains(id)
+);
 """
 
 

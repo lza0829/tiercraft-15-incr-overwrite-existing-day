@@ -45,6 +45,69 @@ def _job_view(row) -> dict:
     return d
 
 
+def _load_json_list(raw) -> list:
+    try:
+        parsed = json.loads(raw or "[]")
+    except (TypeError, ValueError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _paste_day_counts(conn, domain_id: int) -> dict[str, int]:
+    """贴源按业务日计数，与 /layers/paste/day-counts 同源（同一张表、同一种 GROUP BY）。"""
+    rows = conn.execute(
+        """
+        SELECT biz_day, COUNT(*) AS c
+          FROM layer_paste
+         WHERE domain_id=?
+         GROUP BY biz_day
+        """,
+        (domain_id,),
+    ).fetchall()
+    return {str(r["biz_day"]): int(r["c"]) for r in rows}
+
+
+def _verdict_view(row, conn=None) -> dict:
+    """装载裁决证明视图；按日计数读取时从贴源表现算，保证与贴源按日计数同源。"""
+    d = dict(row)
+    written_days = _load_json_list(d.get("written_days"))
+    skipped_days = _load_json_list(d.get("skipped_days"))
+    own_conn = conn is None
+    if own_conn:
+        conn = connect()
+    try:
+        counts = _paste_day_counts(conn, d["domain_id"])
+    finally:
+        if own_conn:
+            conn.close()
+    return {
+        "id": d["id"],
+        "job_id": d["job_id"],
+        "domain_id": d["domain_id"],
+        "load_mode": d["load_mode"],
+        "load_mode_label": LOAD_MODE_LABEL.get(d["load_mode"], "—"),
+        "written_days": written_days,
+        "skipped_days": skipped_days,
+        "written_day_count": len(written_days),
+        "skipped_day_count": len(skipped_days),
+        "downstream_pending": bool(d["downstream_pending"]),
+        "downstream_status_label": DOWNSTREAM_PENDING if d["downstream_pending"] else "非待重跑",
+        "day_row_counts": [
+            {"biz_day": day, "rows": counts.get(day, 0)}
+            for day in (written_days + skipped_days)
+        ],
+        "created_at": d["created_at"],
+    }
+
+
+def _attach_verdicts(conn, jobs: list[dict]) -> None:
+    """给任务视图挂上装载裁决证明（仅贴源装载任务有）。"""
+    rows = conn.execute("SELECT * FROM load_verdicts ORDER BY id").fetchall()
+    by_job = {r["job_id"]: _verdict_view(r, conn) for r in rows}
+    for job in jobs:
+        job["load_verdict"] = by_job.get(job["id"])
+
+
 def _domain_view(row) -> dict:
     d = dict(row)
     d["load_mode_label"] = LOAD_MODE_LABEL.get(d.get("load_mode") or "", "—")
@@ -190,8 +253,33 @@ def _record_load_job(
             fail_reason,
         ),
     )
+    job_id = int(cur.lastrowid)
+    # 装载裁决证明与任务同事务落库，只追加、不可变；
+    # 下游是否待重跑以 domains 持久状态为准，界面刷新后仍可观察。
+    pending_row = conn.execute(
+        "SELECT downstream_status FROM domains WHERE id=?", (domain_id,)
+    ).fetchone()
+    downstream_pending = (
+        pending_row is not None
+        and pending_row["downstream_status"] == DOWNSTREAM_PENDING
+    )
+    conn.execute(
+        """
+        INSERT INTO load_verdicts(
+          job_id, domain_id, load_mode, written_days, skipped_days, downstream_pending
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            job_id,
+            domain_id,
+            mode,
+            json.dumps(written_days, ensure_ascii=False),
+            json.dumps(skipped_days, ensure_ascii=False),
+            1 if downstream_pending else 0,
+        ),
+    )
     return _job_view(
-        conn.execute("SELECT * FROM layer_jobs WHERE id=?", (int(cur.lastrowid),)).fetchone()
+        conn.execute("SELECT * FROM layer_jobs WHERE id=?", (job_id,)).fetchone()
     )
 
 
@@ -222,13 +310,9 @@ def load_paste(domain_id: int) -> dict:
             }
             for day in days:
                 if day["biz_day"] in existing:
+                    # 已存在业务日必须整日跳过：禁止覆盖、禁止删除任何已有日行，
+                    # 只把该日落入跳过清单（任务快照列 + 装载裁决证明）。
                     skipped_days.append(day["biz_day"])
-                    conn.execute(
-                        "DELETE FROM layer_paste WHERE domain_id=? AND biz_day=?",
-                        (domain_id, day["biz_day"]),
-                    )
-                    for record in day["rows"]:
-                        _insert_paste(conn, domain_id, record)
                     continue
                 for record in day["rows"]:
                     _insert_paste(conn, domain_id, record)
@@ -238,6 +322,7 @@ def load_paste(domain_id: int) -> dict:
             )
             if written_days:
                 # 新业务日尚未进入下游；保留已有明细/汇总，只标记待重跑。
+                # 全部跳过时贴源未变化，下游状态保持原样。
                 conn.execute(
                     """
                     UPDATE domains SET downstream_status=?
@@ -250,22 +335,31 @@ def load_paste(domain_id: int) -> dict:
                 )
             message = (
                 f"增量装载：写入 {len(written_days)} 个业务日 / {wrote_rows} 行；"
-                f"跳过 {len(skipped_days)} 个已存在业务日"
+                f"跳过 {len(skipped_days)} 个已存在业务日（整日原样保留，未覆盖未删除）"
             )
         else:
-            # 全量：先整表清空再按夹具重载。解析在上一步已完成，失败不会动到旧数据。
+            # 全量：先清空贴源与下游明细/汇总再按夹具重载。
+            # 解析在上一步已完成，解析失败会直接抛错，不会动到旧数据。
             conn.execute("DELETE FROM layer_paste WHERE domain_id=?", (domain_id,))
+            conn.execute("DELETE FROM layer_detail WHERE domain_id=?", (domain_id,))
+            conn.execute("DELETE FROM layer_summary WHERE domain_id=?", (domain_id,))
             for day in days:
                 for record in day["rows"]:
                     _insert_paste(conn, domain_id, record)
                 written_days.append(day["biz_day"])
             wrote_rows = total_rows
+            # 下游必须进入可观察的待重跑态：旧明细/旧汇总已清空，
+            # 禁止全量后仍把旧下游当已对齐。
+            conn.execute(
+                "UPDATE domains SET downstream_status=? WHERE id=?",
+                (DOWNSTREAM_PENDING, domain_id),
+            )
             conn.execute(
                 "UPDATE reconcile_reports SET stale=1 WHERE domain_id=?", (domain_id,)
             )
             message = (
                 f"全量重载：清空贴源后按夹具重载 {len(written_days)} 个业务日 / {wrote_rows} 行；"
-                "明细与汇总已清空，待重跑"
+                "明细与汇总已清空，下游置为待重跑"
             )
 
         job = _record_load_job(
@@ -279,6 +373,11 @@ def load_paste(domain_id: int) -> dict:
             written_days,
             skipped_days,
         )
+        verdict_row = conn.execute(
+            "SELECT * FROM load_verdicts WHERE job_id=?", (job["id"],)
+        ).fetchone()
+        if verdict_row:
+            job["load_verdict"] = _verdict_view(verdict_row, conn)
         conn.commit()
         return job
     except ValueError as exc:
@@ -296,6 +395,11 @@ def load_paste(domain_id: int) -> dict:
             skipped_days,
             fail_reason,
         )
+        verdict_row = conn.execute(
+            "SELECT * FROM load_verdicts WHERE job_id=?", (job["id"],)
+        ).fetchone()
+        if verdict_row:
+            job["load_verdict"] = _verdict_view(verdict_row, conn)
         conn.commit()
         return job
     except Exception as exc:  # noqa: BLE001 - 任务失败要落记录而不是吞掉
@@ -313,6 +417,11 @@ def load_paste(domain_id: int) -> dict:
             skipped_days,
             fail_reason,
         )
+        verdict_row = conn.execute(
+            "SELECT * FROM load_verdicts WHERE job_id=?", (job["id"],)
+        ).fetchone()
+        if verdict_row:
+            job["load_verdict"] = _verdict_view(verdict_row, conn)
         conn.commit()
         return job
     finally:
@@ -388,7 +497,36 @@ def list_jobs(domain_id: int | None = None) -> list[dict]:
             rows = conn.execute(
                 "SELECT * FROM layer_jobs WHERE domain_id=? ORDER BY id DESC", (domain_id,)
             ).fetchall()
-        return [_job_view(r) for r in rows]
+        jobs = [_job_view(r) for r in rows]
+        _attach_verdicts(conn, jobs)
+        return jobs
+    finally:
+        conn.close()
+
+
+def get_verdict_by_job(job_id: int) -> dict | None:
+    """按任务 id 的只读装载裁决证明查询。"""
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT * FROM load_verdicts WHERE job_id=?", (job_id,)
+        ).fetchone()
+        return _verdict_view(row) if row else None
+    finally:
+        conn.close()
+
+
+def list_verdicts(domain_id: int | None = None) -> list[dict]:
+    conn = connect()
+    try:
+        if domain_id is None:
+            rows = conn.execute("SELECT * FROM load_verdicts ORDER BY id DESC").fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM load_verdicts WHERE domain_id=? ORDER BY id DESC",
+                (domain_id,),
+            ).fetchall()
+        return [_verdict_view(r) for r in rows]
     finally:
         conn.close()
 
@@ -529,6 +667,18 @@ def run_reconcile(domain_id: int) -> dict:
             status = "一致"
         else:
             status = "存在差异"
+        # 只有下游确实有数据且与贴源一致时才允许回到「已对齐」；
+        # 全量重载清空下游后这里不得把空下游重新标成已对齐。
+        if aligned and detail_count > 0:
+            conn.execute(
+                "UPDATE domains SET downstream_status=? WHERE id=?",
+                (DOWNSTREAM_ALIGNED, domain_id),
+            )
+        elif detail_count == 0:
+            conn.execute(
+                "UPDATE domains SET downstream_status=? WHERE id=? AND downstream_status<>?",
+                (DOWNSTREAM_PENDING, domain_id, DOWNSTREAM_NOT_BUILT),
+            )
         detail = {
             "贴源行数": paste_count,
             "明细行数": detail_count,
@@ -538,10 +688,6 @@ def run_reconcile(domain_id: int) -> dict:
             "键对齐": key_mismatch == 0,
             "金额漂移": amount_drift,
         }
-        conn.execute(
-            "UPDATE domains SET downstream_status=? WHERE id=?",
-            (DOWNSTREAM_ALIGNED, domain_id),
-        )
         cur = conn.execute(
             """
             INSERT INTO reconcile_reports(
@@ -610,6 +756,16 @@ def dashboard() -> dict:
                 "写入日": j["written_days"],
                 "跳过日": j["skipped_days"],
                 "失败原因": j["fail_reason"],
+                "装载裁决": (
+                    {
+                        "模式": j["load_verdict"]["load_mode_label"],
+                        "写入日": j["load_verdict"]["written_days"],
+                        "跳过日": j["load_verdict"]["skipped_days"],
+                        "下游待重跑": j["load_verdict"]["downstream_pending"],
+                    }
+                    if j.get("load_verdict")
+                    else None
+                ),
             }
             for j in jobs
         ],

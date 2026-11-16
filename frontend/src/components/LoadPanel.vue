@@ -100,6 +100,25 @@ async function load() {
               <span v-else class="muted">无</span>
             </td>
           </tr>
+          <tr v-if="result.load_verdict">
+            <th>装载裁决证明</th>
+            <td>
+              <div class="muted small">
+                模式：{{ result.load_verdict.load_mode_label }}
+                · 写入日 {{ result.load_verdict.written_day_count }} 个
+                · 跳过日 {{ result.load_verdict.skipped_day_count }} 个
+              </div>
+              <div v-for="c in result.load_verdict.day_row_counts" :key="c.biz_day" class="muted small">
+                {{ c.biz_day }}：{{ c.rows }} 行（与贴源按日计数同源）
+              </div>
+              <div class="small">
+                下游是否待重跑：
+                <b :class="result.load_verdict.downstream_pending ? 'warn' : 'ok'">
+                  {{ result.load_verdict.downstream_pending ? '是（待重跑）' : '否（非待重跑）' }}
+                </b>
+              </div>
+            </td>
+          </tr>
           <tr v-if="result.fail_reason"><th>失败原因</th><td class="warn">{{ result.fail_reason }}</td></tr>
         </tbody>
       </table>
